@@ -1,13 +1,9 @@
-import numpy as np
 import os.path
 import pandas as pd
 import plotly.express  as px
-import statsmodels.api as sm
-from statsmodels.tsa.api import ExponentialSmoothing, SimpleExpSmoothing
+from statsmodels.tsa.api import ExponentialSmoothing
 import statsmodels.tsa.stattools as st
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 import pandas as pd
-import numpy as np
 
 def get_dataframe(file):
     dsRoot  = "./data"
@@ -31,10 +27,6 @@ def map_category_code(cat):
         return tmp.iloc[0]        
         
 
-#def get_pct_change(x, periods):
-#    return x['Total'].pct_change(periods=periods).to_list()[-1:][0]
-    
-    
 def get_moving_avg(tbl, col, periods, rolling):
     tmp = tbl[col].pct_change(periods=periods)
     tmp = tmp.rolling(rolling).mean().to_frame()
@@ -43,17 +35,28 @@ def get_moving_avg(tbl, col, periods, rolling):
 def get_ADF(ds):
     return st.adfuller(ds)
     
+
+def train_test_split(ds, train_pct=0.0, test_len = 0):
+    length = len(ds)
+    if train_pct > 0:
+        train_sz = int(length * train_pct)
+        test_sz = length - train_sz
+    elif test_len > 0:
+        train_sz = length - test_len
+        test_sz = test_len
+    
+    return ds[:train_sz], ds[-test_sz:]
        
-#dfCust        = get_dataframe("olist_customers_dataset.csv")
-#dfGeo         = get_dataframe("olist_geolocation_dataset.csv")
+
 dfItems       = get_dataframe("olist_order_items_dataset.csv")
-#dfPayments    = get_dataframe("olist_order_payments_dataset.csv")
-#dfReviews     = get_dataframe("olist_order_reviews_dataset.csv")
 dfOrders      = get_dataframe("olist_orders_dataset.csv")
 dfProducts    = get_dataframe("olist_products_dataset.csv")
-#dfSellers     = get_dataframe("olist_sellers_dataset.csv")
 dfTranslation = get_dataframe("product_category_name_translation.csv")
-#datasets = [dfCust, dfGeo, dfItems, dfPayments, dfReviews, dfOrders, dfProducts, dfSellers, dfTranslation]
+#dfCust        = get_dataframe("olist_customers_dataset.csv")
+#dfGeo         = get_dataframe("olist_geolocation_dataset.csv")
+#dfPayments    = get_dataframe("olist_order_payments_dataset.csv")
+#dfReviews     = get_dataframe("olist_order_reviews_dataset.csv")
+#dfSellers     = get_dataframe("olist_sellers_dataset.csv")
 
 #Convert columns to datetime
 for i in range(3,8):
@@ -69,11 +72,16 @@ ds['order_purchase_timestamp'] = ds['order_purchase_timestamp'].apply(lambda r:r
 # add the category info to the items data
 ds = ds.merge(dfProducts[['product_id','product_category_name']], on=['product_id'])
 
-# We have merged some empty categories into the table. Rather than create a category,
+# We have merged an empty category into the table. Rather than create a category,
 # just drop the ~1600 records from the 110K+ table.
 fix_dataset(ds)
+
+# Translate the category code from Portuguese to English. There is one translation missing,
+# so instead of dropping it, just call it Unknown.
+# Finally save the dataframe to csv.
 ds['product_category_name'] = ds['product_category_name'].apply(lambda r:map_category_code(r))
 ds = ds.rename(columns={"order_purchase_timestamp":"timestamp", 'product_category_name':'category'}) 
+# - ds.to_csv() - removed once the file was created.
 
 ###################################################################################################
 #
@@ -109,8 +117,6 @@ grp.columns = ['Total', 'Items']
 grp = grp.reset_index()
 ###################################################################################################
 
-
-
 ###################################################################################################
 #
 # Determine the fastest growing category, and create a forecast for its growth
@@ -118,17 +124,6 @@ grp = grp.reset_index()
 # telephoney is the fastest growing category.
 #
 f = grp.groupby('category')
-#for i in range(1, 7):
-#    pct_change = [(tbl[0], get_pct_change(f.get_group(tbl[0]), i)) for tbl in f]
-#    pc = pd.DataFrame(pct_change, columns=['category','pct_change'])
-#    pc = pc.sort_values('pct_change', ascending=False)
-#
-#    # Get the top 5 potential
-#    tbls = [f.get_group(c) for c in pc[:5]['category']]
-#    graph = pd.concat(tbls).reset_index(drop=True).sort_values('timestamp')
-#
-#    px.scatter(graph, x='timestamp', y='Total', color='category', trendline='ols').show()
-
     
 for i in range(1,4):
     rolling_change = [(tbl[0], get_moving_avg(f.get_group(tbl[0]), 'Total', i, 3)) for tbl in f]
@@ -145,55 +140,19 @@ for i in range(1,4):
     px.bar(graph.sort_values('moving_avg', ascending=False), x='category', y='moving_avg').show()
 ###################################################################################################
 
-def train_test_split(ds, train_pct=0.0, test_len = 0):
-    length = len(ds)
-    if train_pct > 0:
-        train_sz = int(length * train_pct)
-        test_sz = length - train_sz
-    elif test_len > 0:
-        train_sz = length - test_len
-        test_sz = test_len
-    
-    return ds[:train_sz], ds[-test_sz:]
 ###################################################################################################
 # Predict 90 days for all sales
-for freq in ['D','W']:
-    tot_sales = ds.groupby(pd.Grouper(key='timestamp', freq=freq)).agg({'price':['sum'], 'order_item_id':['count']}) 
-    tot_sales = pd.DataFrame(tot_sales[28:] if freq == 'D' else tot_sales[17:])
-    tot_sales.columns = ['total','count'] 
-
-    px.scatter(tot_sales, y='total', trendline='ols').show() 
-
-    test_len = 90 if freq == 'D' else 13
-    train, test = train_test_split(tot_sales, test_len=test_len)
-
-    trend = ExponentialSmoothing(train['total'], initialization_method='estimated', trend='add', damped_trend=True).fit()
-    trends = trend.forecast(len(test))
-
-    chart = pd.merge(test['total'], trends.to_frame('proj'), left_index=True, right_index=True).reset_index()
-    chart = chart.melt(id_vars='timestamp')
-
-    tmp = train.reset_index()
-    tmp = tmp[['timestamp','total']].melt(id_vars='timestamp') 
-
-    chart = pd.concat([tmp, chart])
-    px.line(chart, x='timestamp', y='value', color='variable').show()
-
-###################################################################################################
-# Predict the next 90 days for the fastest growing (telephony)
-# 
 freq = 'W'
-fg = ds[ds['category'] == 'telephony']
-fg_sales = fg.groupby(pd.Grouper(key='timestamp', freq = freq)).agg({'price':['sum']})
-fg_sales = pd.DataFrame(fg_sales[17:])
-fg_sales.columns = ['total']
+tot_sales = ds.groupby(pd.Grouper(key='timestamp', freq=freq)).agg({'price':['sum'], 'order_item_id':['count']}) 
+tot_sales = pd.DataFrame(tot_sales[28:] if freq == 'D' else tot_sales[17:])
+tot_sales.columns = ['total','count'] 
 
-px.scatter(fg_sales, y='total', trendline = 'ols').show()
+px.scatter(tot_sales, y='total', trendline='ols').show() 
 
 test_len = 90 if freq == 'D' else 13
-train, test = train_test_split(fg_sales, test_len=test_len)
+train, test = train_test_split(tot_sales, test_len=test_len)
 
-trend = ExponentialSmoothing(train['total'], trend='add', seasonal="add", seasonal_periods=4).fit()
+trend = ExponentialSmoothing(train['total'], initialization_method='estimated', trend='add', damped_trend=True).fit()
 trends = trend.forecast(len(test))
 
 chart = pd.merge(test['total'], trends.to_frame('proj'), left_index=True, right_index=True).reset_index()
@@ -204,11 +163,3 @@ tmp = tmp[['timestamp','total']].melt(id_vars='timestamp')
 
 chart = pd.concat([tmp, chart])
 px.line(chart, x='timestamp', y='value', color='variable').show()
-
-
-
-t = pd.DataFrame(ds[ds['category'] == 'telephony'][['timestamp','price','category']])
-tg = t.groupby(pd.Grouper(key='timestamp', freq='W')).agg({'price':['sum']})
-tgd = tg.diff().fillna(0)
-
-
